@@ -1,6 +1,8 @@
 require('dotenv').config(); // Load environment variables from .env
 
 const IPINFO_TOKEN = process.env.IPINFO_API_KEY; // Grab API key
+console.log('✅ Loaded IPINFO_TOKEN:', IPINFO_TOKEN);
+
 
 (async () => {
   try {
@@ -32,6 +34,10 @@ const IPINFO_TOKEN = process.env.IPINFO_API_KEY; // Grab API key
     app.use(express.json());
 
     const upload = multer({ dest: 'uploads/' });
+    
+    app.get('/api/status', (req, res) => {
+      res.json({ status: 'ok', message: 'WebIntel backend is running' });
+    });
 
     app.post('/api/analyze', upload.single('file'), async (req, res) => {
       try {

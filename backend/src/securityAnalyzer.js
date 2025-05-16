@@ -81,7 +81,8 @@ function normalizeSecurityProductName(rawName) {
 
 function runWAFW00F(domain, timeout = 30000) {
   return new Promise((resolve) => {
-    exec(`wafw00f ${domain}`, { timeout }, (error, stdout, stderr) => {
+    const wafw00fPath = '/opt/webintel-venv/bin/wafw00f';
+    exec(`${wafw00fPath} ${domain}`, { timeout }, (error, stdout, stderr) => {
       if (error) {
         if (error.killed && error.signal === 'SIGTERM') return resolve(['Timeout']);
         if (stderr.includes('Name or service not known')) return resolve(['Invalid domain']);
