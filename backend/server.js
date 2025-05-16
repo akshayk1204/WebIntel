@@ -5,15 +5,13 @@ const IPINFO_TOKEN = process.env.IPINFO_API_KEY;
 (async () => {
   try {
     // Global error handlers
-    process.on('unhandledRejection', (reason, promise) => {
+    process.on('unhandledRejection', (reason) => {
       console.error('Unhandled Rejection:', reason);
-      // Consider not exiting in prod — adjust if needed
       process.exit(1);
     });
 
     process.on('uncaughtException', err => {
       console.error('Uncaught Exception:', err);
-      // Consider not exiting in prod — adjust if needed
       process.exit(1);
     });
 
@@ -28,7 +26,7 @@ const IPINFO_TOKEN = process.env.IPINFO_API_KEY;
     const { exec } = require('child_process');
     const dns = require('dns').promises;
 
-    const analyzeSpreadsheet = require('./src/analyzeSpreadsheet'); // Your spreadsheet logic
+    const analyzeSpreadsheet = require('./src/analyzeSpreadsheet');
 
     const app = express();
     const PORT = process.env.PORT || 5050;
@@ -43,7 +41,7 @@ const IPINFO_TOKEN = process.env.IPINFO_API_KEY;
       res.json({ status: 'ok', message: 'WebIntel backend is running' });
     });
 
-    // Bulk spreadsheet upload analysis route
+    // Bulk spreadsheet analysis route
     app.post('/api/analyze', upload.single('file'), async (req, res) => {
       try {
         const inputPath = req.file.path;
@@ -56,12 +54,8 @@ const IPINFO_TOKEN = process.env.IPINFO_API_KEY;
             }
           }
           // Clean up temp files
-          fs.unlink(inputPath, unlinkErr => {
-            if (unlinkErr) console.error('Error deleting input file:', unlinkErr);
-          });
-          fs.unlink(outputPath, unlinkErr => {
-            if (unlinkErr) console.error('Error deleting output file:', unlinkErr);
-          });
+          fs.unlink(inputPath, err => err && console.error('Error deleting input file:', err));
+          fs.unlink(outputPath, err => err && console.error('Error deleting output file:', err));
         });
       } catch (err) {
         console.error('Error processing spreadsheet:', err);
@@ -71,7 +65,36 @@ const IPINFO_TOKEN = process.env.IPINFO_API_KEY;
       }
     });
 
-    // Helper: Get CDN info from IPInfo API (pass IP, not domain)
+    // Helper: Normalize organization string into known CDN
+    function normalizeCdn(orgString) {
+      const mapping = {
+        cloudflare: 'Cloudflare',
+        akamai: 'Akamai',
+        fastly: 'Fastly',
+        google: 'Google Cloud CDN',
+        amazon: 'Amazon CloudFront',
+        edgecast: 'Edgecast',
+        stackpath: 'StackPath',
+        microsoft: 'Azure CDN',
+        bunny: 'BunnyCDN',
+        quiccloud: 'QuicCloud',
+        imperva: 'Imperva',
+        leaseweb: 'Leaseweb',
+        cdnetworks: 'CDNetworks',
+        limelight: 'Limelight',
+        incapsula: 'Incapsula'
+      };
+
+      const lower = orgString.toLowerCase();
+      for (const keyword in mapping) {
+        if (lower.includes(keyword)) {
+          return mapping[keyword];
+        }
+      }
+      return 'Unknown';
+    }
+
+    // Get CDN info from IPInfo API
     async function getCdnInfo(ip) {
       try {
         const url = `https://ipinfo.io/${ip}/json?token=${IPINFO_TOKEN}`;
@@ -86,45 +109,33 @@ const IPINFO_TOKEN = process.env.IPINFO_API_KEY;
       }
     }
 
-
-// Helper: Run wafw00f CLI tool to detect WAF on domain
+    // Run wafw00f to detect WAF
     function getWafInfo(domain) {
       return new Promise((resolve) => {
-        exec(`wafw00f ${domain}`, (error, stdout, stderr) => {
+        const target = `https://${domain}`;
+        exec(`npx wafw00f ${target}`, { timeout: 10000 }, (error, stdout, stderr) => {
           if (error) {
-            console.error(`wafw00f exec error: ${error.message}`);
+            console.error(`❌ wafw00f exec error: ${error.message}`);
             return resolve('Unknown');
           }
-
-          if (stderr) {
-            console.error(`wafw00f stderr: ${stderr}`);
+    
+          console.log('✅ wafw00f stdout:\n', stdout);  // Debug only; remove in prod
+    
+          const match =
+            stdout.match(/is behind a\s+(.+?)\s+Web Application Firewall/i) ||
+            stdout.match(/Generic detection:\s*(.+)/i);
+    
+          if (match && match[1]) {
+            return resolve(match[1].trim());
           }
-
-          // Look for any WAF detection line
-          const lines = stdout.split('\n');
-          for (const line of lines) {
-            const match = line.match(/Reason:\s*(.*)\s*\(/i);
-            if (match && match[1]) {
-              return resolve(match[1].trim());
-            }
-          }
-
-          // Fallback: Legacy output
-          const alt = lines.find((line) =>
-            line.toLowerCase().includes('waf detected')
-          );
-          if (alt) {
-            const wafName = alt.split(':')[1]?.trim() || 'Unknown';
-            return resolve(wafName);
-          }
-
+    
           return resolve('None detected');
         });
       });
     }
+    
 
-
-    // Adhoc domain analysis route - normalize domain, resolve IP, detect CDN + WAF
+    // Ad hoc domain analysis route
     app.get('/api/analyze/domain', async (req, res) => {
       let domain = req.query.domain;
 
@@ -139,17 +150,19 @@ const IPINFO_TOKEN = process.env.IPINFO_API_KEY;
         domain = domain.replace(/^www\./, '');
         domain = domain.replace(/\/$/, '');
 
-        // Resolve domain to IP
-        const ips = await dns.lookup(domain);
-
-        if (!ips || !ips.address) {
+        // Resolve domain to public IP
+        const resolved = await dns.resolve4(domain);
+        if (!resolved || resolved.length === 0) {
           return res.status(400).json({ error: 'Unable to resolve domain IP' });
         }
+        const ip = resolved[0];
 
-        // Get CDN info using IP
-        const cdn = await getCdnInfo(ips.address);
-        // Get WAF info using domain name
+        const cdn = await getCdnInfo(ip);
         const waf = await getWafInfo(domain);
+
+        // Optional debug logging
+        // console.log(`Resolved IP for ${domain}: ${ip}`);
+        // console.log(`CDN: ${cdn}, WAF: ${waf}`);
 
         return res.json({ cdn, waf });
       } catch (error) {
@@ -166,4 +179,3 @@ const IPINFO_TOKEN = process.env.IPINFO_API_KEY;
     process.exit(1);
   }
 })();
-
