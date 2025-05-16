@@ -1,7 +1,3 @@
-const axios = require('axios');
-const dns = require('dns').promises;
-
-// Complete CDN/Hosting Provider Mapping (ASN → Clean Name)
 const CDN_MAPPING = {
   'AS13335': 'Cloudflare',
   'AS209242': 'Cloudflare',
@@ -46,93 +42,42 @@ const CDN_MAPPING = {
   'AS40034': 'Confluence'
 };
 
-// Keywords indicating self-hosting
-const SELF_HOSTED_KEYWORDS = [
-  'PRIVATE', 'DEDICATED', 'INTERNAL', 'CORPORATE',
-  'ENTERPRISE', 'LOCAL', 'INTRANET'
+const KNOWN_CDNS = [
+  'Cloudflare', 'Fastly', 'Akamai', 'Amazon CloudFront', 'Google Cloud CDN',
+  'Microsoft Azure CDN', 'Imperva', 'Sucuri', 'StackPath', 'CDN77',
+  'G-Core Labs', 'KeyCDN', 'BunnyCDN', 'Section.io', 'Zenlayer', 'Linode',
+  'DigitalOcean', 'OVH', 'GoDaddy', 'HostGator', 'A2 Hosting', 'SingleHop',
+  'ColoCrossing', 'Peer1', 'SoftLayer', 'Canaca', 'Ionos', 'Namecheap',
+  'NS1', 'Confluence'
 ];
 
-// Common providers to keep as-is
-const COMMON_PROVIDERS = [
-  'IP PATHWAYS', 'LIQUID WEB', 'RACKSPACE',
-  'DIGITALOCEAN', 'LINODE', 'VULTR', 'HETZNER', 'UPCLOUD'
-];
+// Normalize org string from IPInfo
+function normalizeCdn(orgString) {
+  if (!orgString || typeof orgString !== 'string') return 'Unknown';
 
-// Legal suffixes to strip
-const LEGAL_SUFFIXES = [
-  'LLC', 'INC', 'LTD', 'CORP', 'CORPORATION',
-  'LIMITED', 'GMBH', 'SA', 'S\\.A', 'PTY', 'PLC'
-];
-
-function cleanProviderName(rawName) {
-  if (!rawName) return null;
-
-  let cleanName = rawName.replace(/^AS\d+\s*/i, '');
-  cleanName = cleanName
-    .replace(new RegExp(`[,.]?\\s*(${LEGAL_SUFFIXES.join('|')})\\b\\.?`, 'gi'), '')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-
-  const upper = cleanName.toUpperCase();
-  if (SELF_HOSTED_KEYWORDS.some(k => upper.includes(k))) return 'Self Hosted';
-  if (COMMON_PROVIDERS.some(p => upper.includes(p))) return cleanName;
-
-  return 'Self Hosted';
-}
-
-async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return await axios.get(url, options);
-    } catch (err) {
-      const isLast = attempt === retries;
-
-      // Retry only on timeout or network errors
-      if (
-        isLast ||
-        !['ECONNABORTED', 'ETIMEDOUT'].includes(err.code) &&
-        !(err.response && err.response.status >= 500)
-      ) throw err;
-
-      await new Promise(res => setTimeout(res, delay * attempt));
+  const asnMatch = orgString.match(/AS\d+/);
+  if (asnMatch) {
+    const asn = asnMatch[0];
+    if (CDN_MAPPING[asn]) {
+      return CDN_MAPPING[asn];
     }
   }
+
+  // Remove ASN and legal suffixes
+  let name = orgString.replace(/AS\d+\s*/g, '')
+                      .replace(/(LLC|Inc\.?|Ltd\.?|GmbH|S\.A\.|Co\.)/gi, '')
+                      .trim();
+
+  // Try matching known CDNs
+  const match = KNOWN_CDNS.find(cdn => name.toLowerCase().includes(cdn.toLowerCase()));
+  if (match) return match;
+
+  if (/vps|bare metal|dedicated/i.test(name)) return 'Self-hosted';
+
+  return 'Unknown';
 }
 
-/**
- * Detects CDN for a given domain using IPInfo.io
- * @param {string} domain - Domain to scan
- * @param {string} token - IPInfo API Token
- * @param {boolean} verbose - Optional: log errors
- */
-async function detectCDN(domain, token, verbose = false) {
-  if (!token) return 'API Token Required';
-  if (!domain) return 'No Domain Provided';
-
-  try {
-    const { address } = await dns.lookup(domain);
-    if (!address) return 'DNS Lookup Failed';
-
-    const url = `https://ipinfo.io/${address}?token=${token}`;
-    const response = await fetchWithRetry(url, { timeout: 6000 });
-
-    const { org, company } = response.data;
-    const asn = org?.split(' ')[0];
-    if (asn && CDN_MAPPING[asn]) return CDN_MAPPING[asn];
-
-    const cleaned = cleanProviderName(org || company?.name);
-    return cleaned || 'Unknown';
-
-  } catch (err) {
-    if (verbose) {
-      console.error(`CDN detection failed for ${domain}:`, err.message);
-    }
-
-    if (err.code === 'ENOTFOUND') return 'DNS Lookup Failed';
-    if (err.response?.status === 429) return 'API Rate Limit Exceeded';
-    if (err.code === 'ECONNABORTED') return 'API Timeout';
-    return 'Detection Failed';
-  }
-}
-
-module.exports = detectCDN;
+module.exports = {
+  CDN_MAPPING,
+  normalizeCdn
+};
