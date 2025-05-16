@@ -1,6 +1,7 @@
 const xlsx = require('xlsx');
 const path = require('path');
 const fs = require('fs');
+const pLimit = require('p-limit');
 const detectCDN = require('./cdnDetector');
 const analyzeSecurity = require('./securityAnalyzer');
 
@@ -10,7 +11,7 @@ function isLikelyUrl(value) {
   return (
     trimmed.startsWith('http://') ||
     trimmed.startsWith('https://') ||
-    /^[\w-]+\.[\w.-]+$/.test(trimmed) // basic domain pattern like example.com
+    /^[\w-]+\.[\w.-]+$/.test(trimmed)
   );
 }
 
@@ -33,40 +34,54 @@ async function analyzeSpreadsheet(inputPath, ipinfoToken) {
     throw new Error('The spreadsheet is empty.');
   }
 
-  // Detect website column dynamically from the first data row
   const websiteColumn = findWebsiteColumn(jsonData[0]);
-
   if (!websiteColumn) {
     throw new Error('No website URL found in any column.');
   }
 
-  const updatedData = await Promise.all(
-    jsonData.map(async (row) => {
+  const limit = pLimit(5); // Max 5 concurrent analyses
+
+  const tasks = jsonData.map((row) =>
+    limit(async () => {
       const rawUrl = (row[websiteColumn] || '').trim();
 
       if (!rawUrl) {
         return { ...row, CDN: 'No Website Provided', Security: 'No Website Provided' };
       }
 
+      let domain;
       try {
-        const domain = new URL(
-          rawUrl.startsWith('http') ? rawUrl : `http://${rawUrl}`
-        ).hostname;
-
-        console.log(`📡 Detecting CDN for ${domain} using token: ${ipinfoToken}`);
-
-        const [cdn, security] = await Promise.all([
-          detectCDN(domain, ipinfoToken),
-          analyzeSecurity(domain),
-        ]);
-
-        return { ...row, CDN: cdn, Security: security };
+        domain = new URL(rawUrl.startsWith('http') ? rawUrl : `http://${rawUrl}`).hostname;
       } catch (err) {
-        console.error(`Error analyzing ${rawUrl}:`, err);
+        console.error(`❌ Invalid URL: ${rawUrl}`);
         return { ...row, CDN: 'Invalid URL', Security: 'Invalid URL' };
       }
+
+      console.log(`📡 Detecting CDN for ${domain} using token: ${ipinfoToken}`);
+
+      let cdn = 'Error', security = 'Error';
+
+      try {
+        cdn = await detectCDN(domain, ipinfoToken);
+      } catch (err) {
+        console.error(`❌ CDN detection failed for ${domain}:`, err.message);
+        cdn = 'CDN Detection Error';
+      }
+
+      try {
+        security = await analyzeSecurity(domain);
+      } catch (err) {
+        console.error(`❌ Security analysis failed for ${domain}:`, err.message);
+        security = 'Security Analysis Error';
+      }
+
+      return { ...row, CDN: cdn, Security: security };
     })
   );
+
+  const updatedData = await Promise.all(tasks);
+
+  console.log('✅ Finished all lookups, writing result file...');
 
   const newSheet = xlsx.utils.json_to_sheet(updatedData);
   const newWorkbook = xlsx.utils.book_new();
@@ -76,6 +91,7 @@ async function analyzeSpreadsheet(inputPath, ipinfoToken) {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   xlsx.writeFile(newWorkbook, outputPath);
 
+  console.log(`✅ Results saved to ${outputPath}`);
   return outputPath;
 }
 
