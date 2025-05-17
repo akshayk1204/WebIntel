@@ -1,3 +1,6 @@
+const dns = require('dns').promises;
+const axios = require('axios');
+
 const CDN_MAPPING = {
   'AS13335': 'Cloudflare',
   'AS209242': 'Cloudflare',
@@ -77,7 +80,29 @@ function normalizeCdn(orgString) {
   return 'Unknown';
 }
 
+// New detectCDN function for your bulk analysis
+async function detectCDN(domain, ipinfoToken) {
+  try {
+    // Resolve domain to IP(s)
+    const ips = await dns.resolve4(domain);
+    if (!ips || ips.length === 0) return 'Unknown';
+
+    const ip = ips[0];
+
+    // Call IPInfo API to get org info
+    const response = await axios.get(`https://ipinfo.io/${ip}/json?token=${ipinfoToken}`);
+    const org = response.data.org || '';
+
+    // Normalize the org to CDN name
+    return normalizeCdn(org);
+  } catch (err) {
+    console.error(`detectCDN error for ${domain}: ${err.message}`);
+    return 'Unknown';
+  }
+}
+
 module.exports = {
   CDN_MAPPING,
-  normalizeCdn
+  normalizeCdn,
+  detectCDN,  // Export this so analyzeSpreadsheet can use it
 };
