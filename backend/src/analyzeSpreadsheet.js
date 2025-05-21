@@ -4,7 +4,6 @@ const fs = require('fs');
 const pLimit = require('p-limit').default;
 const { detectCDN } = require('./cdnDetector');
 const analyzeSecurity = require('./securityAnalyzer');
-const { getTrafficData, formatTrafficData } = require('./trafficAnalyzer');
 
 // Constants
 const MAX_CONCURRENT_REQUESTS = 5;
@@ -41,7 +40,6 @@ function withTimeout(promise, ms, timeoutMessage) {
       const timer = setTimeout(() => {
         reject(new Error(timeoutMessage));
       }, ms);
-      // Make sure we clean up the timer
       promise.finally(() => clearTimeout(timer));
     })
   ]);
@@ -50,8 +48,7 @@ function withTimeout(promise, ms, timeoutMessage) {
 async function analyzeDomain(domain, ipinfoToken) {
   const results = {
     cdn: 'Error',
-    security: 'Error',
-    traffic: 'Error'
+    security: 'Error'
   };
 
   try {
@@ -78,20 +75,6 @@ async function analyzeDomain(domain, ipinfoToken) {
   } catch (err) {
     console.error(`❌ Security analysis failed for ${domain}:`, err.message);
     results.security = `Security: ${err.message.includes('timeout') ? 'Timeout' : 'Error'}`;
-  }
-
-  try {
-    // Traffic Analysis with timeout
-    const trafficData = await withTimeout(
-      getTrafficData(domain),
-      ANALYSIS_TIMEOUT,
-      'Traffic analysis timeout'
-    );
-    results.traffic = formatTrafficData(trafficData);
-    console.log(`✅ Traffic: ${results.traffic}`);
-  } catch (err) {
-    console.error(`❌ Traffic analysis failed for ${domain}:`, err.message);
-    results.traffic = `Traffic: ${err.message.includes('timeout') ? 'Timeout' : 'Error'}`;
   }
 
   return results;
@@ -141,7 +124,7 @@ async function analyzeSpreadsheet(inputPath, ipinfoToken) {
   // Process all rows
   const tasks = jsonData.map((row, index) =>
     limit(async () => {
-      const rowNumber = index + 2; // +2 for header row and 0-based index
+      const rowNumber = index + 2;
       const rawUrl = (row[websiteColumn] || '').trim();
 
       if (!rawUrl) {
@@ -149,8 +132,7 @@ async function analyzeSpreadsheet(inputPath, ipinfoToken) {
         return { 
           ...row, 
           CDN: 'No Website Provided', 
-          Security: 'No Website Provided',
-          Traffic: 'No Website Provided'
+          Security: 'No Website Provided'
         };
       }
 
@@ -160,28 +142,25 @@ async function analyzeSpreadsheet(inputPath, ipinfoToken) {
         return { 
           ...row, 
           CDN: 'Invalid URL', 
-          Security: 'Invalid URL',
-          Traffic: 'Invalid URL'
+          Security: 'Invalid URL'
         };
       }
 
       console.log(`🌐 Row ${rowNumber}: Analyzing domain: ${domain}`);
       
       try {
-        const { cdn, security, traffic } = await analyzeDomain(domain, ipinfoToken);
+        const { cdn, security } = await analyzeDomain(domain, ipinfoToken);
         return { 
           ...row, 
           CDN: cdn,
-          Security: security,
-          Traffic: traffic
+          Security: security
         };
       } catch (err) {
         console.error(`❌ Row ${rowNumber}: Analysis failed for ${domain}:`, err.message);
         return { 
           ...row, 
           CDN: 'Analysis Error', 
-          Security: 'Analysis Error',
-          Traffic: 'Analysis Error'
+          Security: 'Analysis Error'
         };
       }
     })
@@ -189,7 +168,6 @@ async function analyzeSpreadsheet(inputPath, ipinfoToken) {
 
   const updatedData = await Promise.all(tasks);
 
-  // Generate output filename
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const outputFilename = `analysis-results-${timestamp}.xlsx`;
   const outputPath = path.join(OUTPUT_DIR, outputFilename);

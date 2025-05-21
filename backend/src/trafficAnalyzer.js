@@ -1,124 +1,114 @@
-const axios = require('axios');
-const https = require('https');
-require('dotenv').config();
+const puppeteer = require('puppeteer');
 
-const axiosInstance = axios.create({
-  baseURL: 'https://xranks.com/api/v1/',
-  timeout: 15000,
-  httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-  headers: {
-    'Authorization': process.env.XRANKS_API_KEY,
-    'Accept': 'application/json'
-  }
-});
+const trafficCache = new Map();
+const CACHE_TTL = 3600000; // 1 hour
 
-function extractVisitsFromAnyKey(obj) {
-  if (!obj || typeof obj !== 'object') return null;
-
-  for (const key of Object.keys(obj)) {
-    const value = obj[key];
-    
-    // If key includes 'visits' and value looks like a number
-    if (/visits/i.test(key) && (typeof value === 'number' || typeof value === 'string')) {
-      const parsed = typeof value === 'string' 
-        ? parseInt(value.replace(/,/g, '')) 
-        : value;
-
-      if (!isNaN(parsed)) return parsed;
-    }
-
-    // Recursively check nested objects
-    if (typeof value === 'object') {
-      const nested = extractVisitsFromAnyKey(value);
-      if (nested !== null) return nested;
-    }
-  }
-
-  return null;
+function normalizeDomain(domain) {
+  return domain.replace(/^(https?:\/\/)?(www\.)?/i, '').split('/')[0].toLowerCase();
 }
 
-async function getXranksTraffic(domain) {
-  const cleanDomain = domain.replace(/^(https?:\/\/)?(www\.)?/, '');
-  
+function parseVisitCount(text) {
+  if (!text) return null;
+
+  const match = text.match(/([\d.,]+)\s*(M|K)?/i);
+  if (!match) return null;
+
+  let number = parseFloat(match[1].replace(/,/g, ''));
+  const unit = match[2]?.toUpperCase();
+
+  if (isNaN(number)) return null;
+  if (unit === 'M') return Math.round(number * 1_000_000);
+  if (unit === 'K') return Math.round(number * 1_000);
+  return Math.round(number);
+}
+
+async function getHypestatTraffic(domain) {
+  const cleanDomain = normalizeDomain(domain);
+
+  const cached = trafficCache.get(cleanDomain);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.data;
+  }
+
+  const url = `https://hypestat.com/info/${cleanDomain}`;
+  console.log(`🌐 Scraping Hypestat (headless) for: ${cleanDomain}`);
+
   try {
-    console.log(`🌐 Fetching XRanks data for: ${cleanDomain}`);
-    
-    const response = await axiosInstance.get('domain/rank', {
-      params: { domain: cleanDomain }
+    const browser = await puppeteer.launch({
+      headless: 'new', // Or true
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+        '--single-process'
+      ]
     });
 
-    const data = response.data;
-    
-    // Try to find visits or estimated daily users, fallback to rank if nothing else
-    let monthlyVisits = null;
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+                            '(KHTML, like Gecko) Chrome/115.0 Safari/537.36');
 
-    if (data.estimated_daily_users) {
-      monthlyVisits = data.estimated_daily_users * 30; // rough monthly estimate
-    }
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-    // If no visits or daily users, optionally use rank as a proxy (not visits)
-    if (!monthlyVisits && data.rank) {
-      monthlyVisits = null;  // or keep null, since rank is not visits
-    }
+    const monthlyVisits = await page.evaluate(() => {
+      const row = Array.from(document.querySelectorAll('td')).find(td =>
+        td.textContent.trim() === 'Monthly Visits'
+      );
+      if (row && row.nextElementSibling) {
+        return row.nextElementSibling.textContent.trim();
+      }
+      return null;
+    });
 
-    if (!monthlyVisits) {
-      console.error('Monthly visits not found or zero in XRanks data:', data);
+    await browser.close();
+
+    const parsedVisits = parseVisitCount(monthlyVisits);
+    if (!parsedVisits) {
+      console.warn(`⚠️ Monthly visits not found for ${cleanDomain}`);
       return null;
     }
 
-    return {
-      monthlyVisits,
-      source: 'XRanks'
+    const result = {
+      monthlyVisits: parsedVisits,
+      source: 'Hypestat'
     };
-  } catch (error) {
-    console.error(`❌ XRanks API failed for ${cleanDomain}:`, {
-      status: error.response?.status,
-      data: error.response?.data,
-      message: error.message
+
+    trafficCache.set(cleanDomain, {
+      data: result,
+      timestamp: Date.now()
     });
+
+    return result;
+  } catch (err) {
+    console.error(`❌ Puppeteer error for ${cleanDomain}:`, err.message);
     return null;
   }
 }
 
-
-
-// Cache implementation
-const trafficCache = new Map();
-const CACHE_TTL = 3600000; // 1 hour
-
-async function getTrafficData(domain) {
-  const cacheKey = domain.toLowerCase();
-  
-  if (trafficCache.has(cacheKey)) {
-    const cached = trafficCache.get(cacheKey);
-    if (Date.now() - cached.timestamp < CACHE_TTL) {
-      return cached.data;
-    }
-  }
-
-  const result = await getXranksTraffic(domain);
-  if (result) {
-    trafficCache.set(cacheKey, {
-      data: result,
-      timestamp: Date.now()
-    });
-  }
-  return result;
-}
-
 function formatTrafficData(data) {
   if (!data?.monthlyVisits) return 'No data available';
-  
-  if (data.monthlyVisits >= 1000000) {
-    return `${(data.monthlyVisits/1000000).toFixed(1)}M/mo (${data.source})`;
+
+  const visits = data.monthlyVisits;
+  const source = data.source;
+
+  if (visits >= 1_000_000) {
+    return `${(visits / 1_000_000).toFixed(1)}M/mo (${source})`;
   }
-  if (data.monthlyVisits >= 1000) {
-    return `${(data.monthlyVisits/1000).toFixed(1)}K/mo (${data.source})`;
+  if (visits >= 1_000) {
+    return `${(visits / 1_000).toFixed(1)}K/mo (${source})`;
   }
-  return `${data.monthlyVisits}/mo (${data.source})`;
+  return `${visits}/mo (${source})`;
+}
+
+async function getTrafficData(domain) {
+  const data = await getHypestatTraffic(domain);
+  return formatTrafficData(data);
 }
 
 module.exports = {
+  getHypestatTraffic,
   getTrafficData,
   formatTrafficData
 };
