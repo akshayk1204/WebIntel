@@ -1,5 +1,7 @@
 require('dotenv').config(); // Load environment variables from .env
 
+console.log('📦 Loaded XRANKS_API_KEY:', process.env.XRANKS_API_KEY);
+
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
